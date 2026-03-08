@@ -23,6 +23,10 @@ CRON_LOG_PATH = LOGS_DIR / "cron.log"
 MA_SHORT = 5
 MA_LONG = 30
 
+# Monkey market filter: ignore crossovers when |MA_SHORT - MA_LONG| / price < threshold
+# Set to 0 to disable the filter
+MA_GAP_THRESHOLD = float(os.environ.get("TQQQ_MA_GAP_THRESHOLD", "1.0"))
+
 # Webhook (Slack/Discord)
 WEBHOOK_URL = os.environ.get("TQQQ_WEBHOOK_URL", "")
 

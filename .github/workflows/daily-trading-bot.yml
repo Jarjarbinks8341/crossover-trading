@@ -7,6 +7,12 @@ on:
     - cron: '0 14 * * 1-5'
 
   workflow_dispatch:  # Allow manual trigger for testing
+    inputs:
+      skip_calendar_check:
+        description: 'Skip NYSE trading day check'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   fetch-and-analyze:
@@ -45,7 +51,11 @@ jobs:
           TZ: America/New_York
         run: |
           echo "Running trading bot for TQQQ and YINN..."
-          python scripts/fetch_data.py
+          ARGS=""
+          if [ "${{ github.event.inputs.skip_calendar_check }}" = "true" ]; then
+            ARGS="--skip-calendar-check"
+          fi
+          python scripts/fetch_data.py $ARGS
 
       - name: Save database for next run
         uses: actions/upload-artifact@v4

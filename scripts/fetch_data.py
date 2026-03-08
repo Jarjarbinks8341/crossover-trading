@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tqqq.config import HISTORY_DAYS, TICKERS
+from tqqq.trading_calendar import is_trading_day
 from tqqq.database import (
     get_connection,
     get_last_date,
@@ -46,9 +47,22 @@ def main():
         action="store_true",
         help="Skip notifications (useful when initializing new ticker history)",
     )
+    parser.add_argument(
+        "--skip-calendar-check",
+        action="store_true",
+        help="Skip NYSE trading day check (run even on holidays)",
+    )
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Check if today is a trading day
+    if not args.skip_calendar_check and not args.full:
+        today = datetime.now().date()
+        if not is_trading_day(today):
+            print(f"[{timestamp}] Today ({today}) is not a NYSE trading day. Skipping.")
+            print(f"[{timestamp}] Use --skip-calendar-check to override.")
+            return
 
     # Determine which tickers to process
     tickers_to_process = [args.ticker.upper()] if args.ticker else TICKERS

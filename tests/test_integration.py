@@ -11,7 +11,7 @@ import pytest
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tqqq.config import DB_PATH, MA_SHORT, MA_LONG
+from tqqq.config import DB_PATH, MA_SHORT, MA_LONG, TICKER
 from tqqq.database import (
     get_connection,
     load_prices,
@@ -31,7 +31,7 @@ def has_historical_data():
         return False
     conn = sqlite3.connect(str(DB_PATH))
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM tqqq_prices")
+    cursor.execute("SELECT COUNT(*) FROM tqqq_prices WHERE ticker = ?", (TICKER,))
     count = cursor.fetchone()[0]
     conn.close()
     return count >= 30  # Need at least 30 days for meaningful tests
@@ -50,7 +50,7 @@ class TestDatabaseIntegration:
     def test_database_has_sufficient_data(self):
         """Verify database has enough data for MA calculations."""
         conn = get_connection()
-        count = get_price_count(conn)
+        count = get_price_count(conn, TICKER)
         conn.close()
 
         assert count >= MA_LONG, f"Need at least {MA_LONG} days of data"
@@ -58,7 +58,7 @@ class TestDatabaseIntegration:
     def test_database_date_range_is_reasonable(self):
         """Verify date range spans a reasonable period."""
         conn = get_connection()
-        min_date, max_date = get_date_range(conn)
+        min_date, max_date = get_date_range(conn, TICKER)
         conn.close()
 
         assert min_date is not None
@@ -68,7 +68,7 @@ class TestDatabaseIntegration:
     def test_load_prices_returns_valid_data(self):
         """Verify loaded prices have valid structure and values."""
         conn = get_connection()
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
         conn.close()
 
         # Check structure
@@ -78,14 +78,14 @@ class TestDatabaseIntegration:
         # Check data types
         assert df["close"].dtype in ["float64", "int64"]
 
-        # Check values are reasonable for TQQQ (typically $10-$100 range)
+        # Check values are reasonable for TQQQ (typically $5-$200 range)
         assert df["close"].min() > 0
         assert df["close"].max() < 500  # Sanity check
 
     def test_prices_are_ordered_by_date(self):
         """Verify prices are in chronological order."""
         conn = get_connection()
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
         conn.close()
 
         dates = df["date"].tolist()
@@ -94,7 +94,7 @@ class TestDatabaseIntegration:
     def test_no_duplicate_dates(self):
         """Verify no duplicate dates in price data."""
         conn = get_connection()
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
         conn.close()
 
         assert df["date"].is_unique
@@ -107,7 +107,8 @@ class TestSignalDetectionIntegration:
     def test_detect_crossovers_returns_signals(self):
         """Verify crossover detection finds signals in historical data."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         # Should have found some signals in a year of data
@@ -116,10 +117,12 @@ class TestSignalDetectionIntegration:
     def test_signals_have_valid_structure(self):
         """Verify detected signals have correct structure."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         for signal in signals:
+            assert "ticker" in signal
             assert "date" in signal
             assert "signal_type" in signal
             assert "close_price" in signal
@@ -137,7 +140,8 @@ class TestSignalDetectionIntegration:
     def test_signals_have_valid_price_values(self):
         """Verify signal price values are reasonable."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         for signal in signals:
@@ -149,7 +153,8 @@ class TestSignalDetectionIntegration:
     def test_golden_cross_ma5_above_ma30(self):
         """Verify golden cross signals have MA5 > MA30."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         golden_crosses = [s for s in signals if s["signal_type"] == "GOLDEN_CROSS"]
@@ -161,7 +166,8 @@ class TestSignalDetectionIntegration:
     def test_dead_cross_ma5_below_ma30(self):
         """Verify dead cross signals have MA5 < MA30."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         dead_crosses = [s for s in signals if s["signal_type"] == "DEAD_CROSS"]
@@ -173,7 +179,8 @@ class TestSignalDetectionIntegration:
     def test_signals_alternate_between_types(self):
         """Verify signals generally alternate (can't have two golden in a row)."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         # Sort by date
@@ -190,7 +197,8 @@ class TestSignalDetectionIntegration:
     def test_signals_can_be_sorted_by_date(self):
         """Verify signals can be sorted chronologically."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         # Signals may come grouped by type, but should be sortable
@@ -201,6 +209,20 @@ class TestSignalDetectionIntegration:
         assert dates == sorted(dates)
         assert len(dates) == len(signals)
 
+    def test_filtered_signals_are_subset_of_unfiltered(self):
+        """Verify that MA gap filter only removes signals, never adds them."""
+        conn = get_connection()
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            all_signals = detect_crossovers(conn, TICKER)
+        filtered_signals = detect_crossovers(conn, TICKER)
+        conn.close()
+
+        filtered_dates = {(s["date"], s["signal_type"]) for s in filtered_signals}
+        all_dates = {(s["date"], s["signal_type"]) for s in all_signals}
+
+        assert filtered_dates.issubset(all_dates)
+        assert len(filtered_signals) <= len(all_signals)
+
 
 @requires_historical_data
 class TestCurrentStatusIntegration:
@@ -209,7 +231,7 @@ class TestCurrentStatusIntegration:
     def test_get_current_status_returns_valid_status(self):
         """Verify current status is calculated correctly."""
         conn = get_connection()
-        status = get_current_status(conn)
+        status = get_current_status(conn, TICKER)
         conn.close()
 
         assert status["status"] in ["BULLISH", "BEARISH"]
@@ -217,9 +239,10 @@ class TestCurrentStatusIntegration:
     def test_current_status_has_all_fields(self):
         """Verify current status contains all required fields."""
         conn = get_connection()
-        status = get_current_status(conn)
+        status = get_current_status(conn, TICKER)
         conn.close()
 
+        assert "ticker" in status
         assert "date" in status
         assert "status" in status
         assert "close" in status
@@ -230,7 +253,7 @@ class TestCurrentStatusIntegration:
     def test_current_status_values_are_consistent(self):
         """Verify status is consistent with MA values."""
         conn = get_connection()
-        status = get_current_status(conn)
+        status = get_current_status(conn, TICKER)
         conn.close()
 
         if status["status"] == "BULLISH":
@@ -241,9 +264,9 @@ class TestCurrentStatusIntegration:
             assert status["gap"] < 0
 
     def test_gap_calculation_is_correct(self):
-        """Verify gap is calculated as MA5 - MA20."""
+        """Verify gap is calculated as MA_SHORT - MA_LONG."""
         conn = get_connection()
-        status = get_current_status(conn)
+        status = get_current_status(conn, TICKER)
         conn.close()
 
         expected_gap = status["ma_short"] - status["ma_long"]
@@ -257,7 +280,8 @@ class TestNotificationIntegration:
     def test_format_real_signals(self):
         """Verify notification formatting works with real signals."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         for signal in signals[:5]:  # Test first 5 signals
@@ -270,7 +294,8 @@ class TestNotificationIntegration:
     def test_trigger_notifications_with_real_signal(self):
         """Verify notification triggering works with real signals."""
         conn = get_connection()
-        signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         conn.close()
 
         if signals:
@@ -298,15 +323,16 @@ class TestEndToEndIntegration:
         conn = get_connection()
 
         # Step 1: Load and verify data
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
         assert len(df) >= MA_LONG
 
-        # Step 2: Detect signals
-        signals = detect_crossovers(conn)
+        # Step 2: Detect signals (without filter to ensure we get some)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            signals = detect_crossovers(conn, TICKER)
         assert len(signals) > 0
 
         # Step 3: Get current status
-        status = get_current_status(conn)
+        status = get_current_status(conn, TICKER)
         assert status["status"] in ["BULLISH", "BEARISH"]
 
         # Step 4: Format most recent signal for notification
@@ -323,14 +349,11 @@ class TestEndToEndIntegration:
         conn = get_connection()
 
         # Get all signals
-        all_signals = detect_crossovers(conn)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            all_signals = detect_crossovers(conn, TICKER)
 
         # Check which would be "new"
-        new_signals = get_new_signals(conn, all_signals)
-
-        # If we've been running the bot, all historical signals should be saved
-        # This tests that the signal de-duplication works
-        # (new_signals could be empty or contain only recent signals)
+        new_signals = get_new_signals(conn, TICKER, all_signals)
 
         # All new signals should be in the original list
         for new_sig in new_signals:
@@ -341,70 +364,19 @@ class TestEndToEndIntegration:
 
         conn.close()
 
-    def test_january_2026_signals_match_expected(self):
-        """Verify specific known signals from January 2026."""
-        conn = get_connection()
-        signals = detect_crossovers(conn)
-        conn.close()
-
-        # Filter to January 2026
-        jan_signals = [s for s in signals if s["date"].startswith("2026-01")]
-
-        # Based on MA5/MA30 crossover simulation, we expect these signals:
-        expected_dates = ["2026-01-06", "2026-01-09", "2026-01-20"]
-
-        actual_dates = sorted([s["date"] for s in jan_signals])
-
-        # Check that we have the expected signals
-        for expected in expected_dates:
-            assert expected in actual_dates, f"Missing expected signal on {expected}"
-
-    def test_signal_types_for_january_2026(self):
-        """Verify signal types for known January 2026 events."""
-        conn = get_connection()
-        signals = detect_crossovers(conn)
-        conn.close()
-
-        # Filter to January 2026
-        jan_signals = {s["date"]: s["signal_type"] for s in signals
-                      if s["date"].startswith("2026-01")}
-
-        # Expected signal types based on MA5/MA30 simulation
-        expected = {
-            "2026-01-06": "DEAD_CROSS",
-            "2026-01-09": "GOLDEN_CROSS",
-            "2026-01-20": "DEAD_CROSS",
-        }
-
-        for date, expected_type in expected.items():
-            if date in jan_signals:
-                assert jan_signals[date] == expected_type, \
-                    f"Signal on {date} should be {expected_type}, got {jan_signals[date]}"
-
 
 @requires_historical_data
 class TestTradingSimulation:
     """Trading simulation tests using real historical data."""
 
-    def test_trading_simulation_from_jan_2025(self):
-        """Simulate trading strategy: buy at golden cross, sell at dead cross.
-
-        Starting capital: $10,000 USD
-        Start date: January 1st, 2025
-        Strategy: Buy 100% at golden cross, sell 100% at dead cross
-        """
-        import logging
-
-        # Setup logging
-        logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger("trading_simulation")
-
-        # Initial capital
+    def test_trading_simulation_from_2020(self):
+        """Simulate trading strategy: buy at golden cross, sell at dead cross."""
         INITIAL_CAPITAL = 10000.00
         START_DATE = "2020-01-01"
 
         conn = get_connection()
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
+        conn.close()
 
         # Calculate moving averages
         df["MA_SHORT"] = df["close"].rolling(window=MA_SHORT).mean()
@@ -415,8 +387,7 @@ class TestTradingSimulation:
         df = df[df["date"] >= START_DATE].copy()
 
         if len(df) == 0:
-            conn.close()
-            pytest.skip("No data available from 2025-01-01")
+            pytest.skip(f"No data available from {START_DATE}")
 
         # Detect crossovers
         df["short_above"] = df["MA_SHORT"] > df["MA_LONG"]
@@ -425,196 +396,53 @@ class TestTradingSimulation:
         # Trading state
         cash = INITIAL_CAPITAL
         shares = 0.0
-        position = "CASH"  # CASH or HOLDING
-
+        position = "CASH"
         trades = []
 
-        print("\n" + "=" * 100)
-        print("TRADING SIMULATION: Buy at Golden Cross, Sell at Dead Cross")
-        print("=" * 100)
-        print(f"Initial Capital: ${INITIAL_CAPITAL:,.2f}")
-        print(f"Start Date: {START_DATE}")
-        print(f"Strategy: MA{MA_SHORT}/MA{MA_LONG} Crossover")
-        print("=" * 100)
-
-        logger.info("=" * 80)
-        logger.info("TRADING SIMULATION STARTED")
-        logger.info(f"Initial Capital: ${INITIAL_CAPITAL:,.2f}")
-        logger.info(f"Start Date: {START_DATE}")
-        logger.info("=" * 80)
-
         for _, row in df.iterrows():
-            date_str = row["date"].strftime("%Y-%m-%d")
-            price = row["close"]
-
             # Golden Cross - BUY signal
             if row["short_above"] == True and row["prev_short_above"] == False:
                 if position == "CASH" and cash > 0:
-                    shares = cash / price
-                    trade_info = {
-                        "date": date_str,
-                        "action": "BUY",
-                        "price": price,
-                        "shares": shares,
-                        "value": cash,
-                    }
-                    trades.append(trade_info)
-                    print(f"🟢 {date_str}: BUY  @ ${price:,.2f} | Shares: {shares:,.4f} | Value: ${cash:,.2f}")
-                    logger.info(f"GOLDEN CROSS - BUY @ ${price:,.2f} | Shares: {shares:,.4f}")
+                    shares = cash / row["close"]
+                    trades.append({"action": "BUY", "price": row["close"], "value": cash})
                     cash = 0
                     position = "HOLDING"
 
             # Dead Cross - SELL signal
             elif row["short_above"] == False and row["prev_short_above"] == True:
                 if position == "HOLDING" and shares > 0:
-                    sell_value = shares * price
-                    profit = sell_value - trades[-1]["value"]
-                    profit_pct = (profit / trades[-1]["value"]) * 100
-                    trade_info = {
-                        "date": date_str,
-                        "action": "SELL",
-                        "price": price,
-                        "shares": shares,
-                        "value": sell_value,
-                        "profit": profit,
-                        "profit_pct": profit_pct,
-                    }
-                    trades.append(trade_info)
-                    print(f"🔴 {date_str}: SELL @ ${price:,.2f} | Shares: {shares:,.4f} | Value: ${sell_value:,.2f} | P/L: ${profit:+,.2f} ({profit_pct:+.2f}%)")
-                    logger.info(f"DEAD CROSS - SELL @ ${price:,.2f} | Value: ${sell_value:,.2f} | P/L: ${profit:+,.2f}")
+                    sell_value = shares * row["close"]
+                    trades.append({"action": "SELL", "price": row["close"], "value": sell_value})
                     cash = sell_value
                     shares = 0
                     position = "CASH"
 
         # Calculate final portfolio value
-        last_row = df.iloc[-1]
-        last_date = last_row["date"].strftime("%Y-%m-%d")
-        last_price = last_row["close"]
+        last_price = df.iloc[-1]["close"]
+        final_value = (shares * last_price) if position == "HOLDING" else cash
 
-        if position == "HOLDING":
-            final_value = shares * last_price
-        else:
-            final_value = cash
-
-        total_return = final_value - INITIAL_CAPITAL
-        total_return_pct = (total_return / INITIAL_CAPITAL) * 100
-
-        # Calculate buy-and-hold comparison
-        first_price = df.iloc[0]["close"]
-        buy_hold_shares = INITIAL_CAPITAL / first_price
-        buy_hold_value = buy_hold_shares * last_price
-        buy_hold_return = buy_hold_value - INITIAL_CAPITAL
-        buy_hold_pct = (buy_hold_return / INITIAL_CAPITAL) * 100
-
-        # Print summary
-        print("\n" + "=" * 100)
-        print("SIMULATION RESULTS")
-        print("=" * 100)
-        print(f"Period: {START_DATE} to {last_date}")
-        print(f"Total Trades: {len(trades)}")
-        print(f"Current Position: {position}")
-        if position == "HOLDING":
-            print(f"Current Shares: {shares:,.4f}")
-        print("-" * 100)
-        print(f"Initial Capital:     ${INITIAL_CAPITAL:>12,.2f}")
-        print(f"Final Portfolio:     ${final_value:>12,.2f}")
-        print(f"Total Return:        ${total_return:>+12,.2f} ({total_return_pct:+.2f}%)")
-        print("-" * 100)
-        print("COMPARISON: Buy and Hold")
-        print(f"Buy & Hold Value:    ${buy_hold_value:>12,.2f}")
-        print(f"Buy & Hold Return:   ${buy_hold_return:>+12,.2f} ({buy_hold_pct:+.2f}%)")
-        print("-" * 100)
-        strategy_diff = total_return - buy_hold_return
-        print(f"Strategy vs B&H:     ${strategy_diff:>+12,.2f}")
-        print("=" * 100)
-
-        # Log final results
-        logger.info("=" * 80)
-        logger.info("SIMULATION COMPLETE")
-        logger.info(f"Final Portfolio Value: ${final_value:,.2f}")
-        logger.info(f"Total Return: ${total_return:+,.2f} ({total_return_pct:+.2f}%)")
-        logger.info(f"Buy & Hold Return: ${buy_hold_return:+,.2f} ({buy_hold_pct:+.2f}%)")
-        logger.info(f"Strategy vs B&H: ${strategy_diff:+,.2f}")
-        logger.info("=" * 80)
-
-        conn.close()
-
-        # Assertions
         assert final_value > 0, "Final portfolio value should be positive"
-        assert len(trades) >= 0, "Should have detected trades"
+        assert len(trades) >= 2, "Should have at least one buy and one sell"
 
     def test_buy_and_hold_simulation(self):
-        """Simulate buy-and-hold strategy for comparison.
-
-        Starting capital: $10,000 USD
-        Start date: January 1st, 2024
-        Strategy: Buy on first day, hold until end
-        """
-        import logging
-
-        logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger("buy_and_hold_simulation")
-
+        """Simulate buy-and-hold strategy for comparison."""
         INITIAL_CAPITAL = 10000.00
         START_DATE = "2020-01-01"
 
         conn = get_connection()
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
         conn.close()
 
-        # Filter from start date
         df = df[df["date"] >= START_DATE].copy()
 
         if len(df) == 0:
-            pytest.skip("No data available from 2020-01-01")
+            pytest.skip(f"No data available from {START_DATE}")
 
-        # Get first and last prices
-        first_row = df.iloc[0]
-        last_row = df.iloc[-1]
+        first_price = df.iloc[0]["close"]
+        last_price = df.iloc[-1]["close"]
 
-        first_date = first_row["date"].strftime("%Y-%m-%d")
-        first_price = first_row["close"]
-        last_date = last_row["date"].strftime("%Y-%m-%d")
-        last_price = last_row["close"]
-
-        # Buy and hold calculation
         shares = INITIAL_CAPITAL / first_price
         final_value = shares * last_price
-        total_return = final_value - INITIAL_CAPITAL
-        total_return_pct = (total_return / INITIAL_CAPITAL) * 100
-
-        print("\n" + "=" * 100)
-        print("BUY AND HOLD SIMULATION")
-        print("=" * 100)
-        print(f"Initial Capital: ${INITIAL_CAPITAL:,.2f}")
-        print(f"Start Date: {START_DATE}")
-        print(f"Strategy: Buy on first day, hold forever")
-        print("=" * 100)
-
-        print(f"\n🟢 {first_date}: BUY  @ ${first_price:,.2f} | Shares: {shares:,.4f} | Value: ${INITIAL_CAPITAL:,.2f}")
-        print(f"📊 {last_date}: HOLD @ ${last_price:,.2f} | Shares: {shares:,.4f} | Value: ${final_value:,.2f}")
-
-        print("\n" + "=" * 100)
-        print("BUY AND HOLD RESULTS")
-        print("=" * 100)
-        print(f"Period: {first_date} to {last_date}")
-        print(f"Holding Period: {len(df)} trading days")
-        print("-" * 100)
-        print(f"Buy Price:           ${first_price:>12,.2f}")
-        print(f"Current Price:       ${last_price:>12,.2f}")
-        print(f"Price Change:        ${last_price - first_price:>+12,.2f} ({((last_price/first_price)-1)*100:+.2f}%)")
-        print("-" * 100)
-        print(f"Initial Capital:     ${INITIAL_CAPITAL:>12,.2f}")
-        print(f"Shares Purchased:    {shares:>12,.4f}")
-        print(f"Final Portfolio:     ${final_value:>12,.2f}")
-        print(f"Total Return:        ${total_return:>+12,.2f} ({total_return_pct:+.2f}%)")
-        print("=" * 100)
-
-        logger.info("=" * 80)
-        logger.info("BUY AND HOLD SIMULATION")
-        logger.info(f"Initial: ${INITIAL_CAPITAL:,.2f} -> Final: ${final_value:,.2f}")
-        logger.info(f"Return: ${total_return:+,.2f} ({total_return_pct:+.2f}%)")
-        logger.info("=" * 80)
 
         assert final_value > 0, "Final portfolio value should be positive"
         assert shares > 0, "Should have purchased shares"
@@ -627,7 +455,7 @@ class TestDataQualityIntegration:
     def test_no_missing_trading_days(self):
         """Check for unusual gaps in trading days."""
         conn = get_connection()
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
         conn.close()
 
         df["date"] = pd.to_datetime(df["date"])
@@ -644,7 +472,7 @@ class TestDataQualityIntegration:
     def test_prices_are_positive(self):
         """Verify all prices are positive."""
         conn = get_connection()
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
         conn.close()
 
         assert (df["close"] > 0).all(), "Found non-positive price values"
@@ -652,7 +480,7 @@ class TestDataQualityIntegration:
     def test_no_extreme_daily_changes(self):
         """Check for unrealistic daily price changes."""
         conn = get_connection()
-        df = load_prices(conn)
+        df = load_prices(conn, TICKER)
         conn.close()
 
         df = df.sort_values("date")

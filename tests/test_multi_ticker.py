@@ -1,5 +1,7 @@
 """Integration tests for multi-ticker support."""
 
+from unittest.mock import patch
+
 import pandas as pd
 import pytest
 
@@ -155,8 +157,9 @@ class TestMultiTickerSignals:
         )
         save_prices(conn, "YINN", yinn_flat)
 
-        # TQQQ should have crossover
-        tqqq_signals = detect_crossovers(conn, "TQQQ")
+        # TQQQ should have crossover (disable gap filter for this test data)
+        with patch("tqqq.signals.MA_GAP_THRESHOLD", 0):
+            tqqq_signals = detect_crossovers(conn, "TQQQ")
         assert len(tqqq_signals) >= 1
         assert tqqq_signals[0]["ticker"] == "TQQQ"
 

@@ -5,7 +5,7 @@ from typing import List, Dict
 
 import pandas as pd
 
-from .config import MA_SHORT, MA_LONG
+from .config import MA_SHORT, MA_LONG, MA_GAP_THRESHOLD
 from .database import load_prices
 
 
@@ -14,6 +14,14 @@ def detect_crossovers(conn: sqlite3.Connection, ticker: str) -> List[Dict]:
 
     Golden Cross: Short MA crosses above Long MA (bullish)
     Dead Cross: Short MA crosses below Long MA (bearish)
+
+    Signals are filtered by MA gap threshold to avoid whipsaws in choppy
+    ("monkey") markets. A crossover is only reported when the gap between
+    MA_SHORT and MA_LONG is at least MA_GAP_THRESHOLD percent of the price.
+
+    The filter is position-aware: after skipping a weak crossover, subsequent
+    crossovers of the same type are suppressed until a valid opposite signal
+    occurs. This ensures signals always alternate (buy, sell, buy, sell...).
 
     Args:
         conn: Database connection.
@@ -36,31 +44,39 @@ def detect_crossovers(conn: sqlite3.Connection, ticker: str) -> List[Dict]:
     df["short_above"] = df["MA_SHORT"] > df["MA_LONG"]
     df["prev_short_above"] = df["short_above"].shift(1)
 
+    # MA gap as percentage of price (monkey market filter)
+    df["ma_gap_pct"] = ((df["MA_SHORT"] - df["MA_LONG"]) / df["close"]).abs() * 100
+
     signals = []
+    last_signal_type = None  # Track last emitted signal to enforce alternation
 
-    # Golden Cross: Short MA crosses from below to above Long MA
-    golden = df[(df["short_above"] == True) & (df["prev_short_above"] == False)]
-    for _, row in golden.iterrows():
+    # Process all crossovers in chronological order
+    crossovers = df[
+        ((df["short_above"] == True) & (df["prev_short_above"] == False))
+        | ((df["short_above"] == False) & (df["prev_short_above"] == True))
+    ]
+
+    for _, row in crossovers.iterrows():
+        is_golden = row["short_above"]
+        signal_type = "GOLDEN_CROSS" if is_golden else "DEAD_CROSS"
+
+        # Skip if gap is too small (monkey market filter)
+        if MA_GAP_THRESHOLD > 0 and row["ma_gap_pct"] < MA_GAP_THRESHOLD:
+            continue
+
+        # Skip if same signal type as last emitted (enforce alternation)
+        if signal_type == last_signal_type:
+            continue
+
         signals.append({
             "ticker": ticker,
             "date": row["date"].strftime("%Y-%m-%d"),
-            "signal_type": "GOLDEN_CROSS",
+            "signal_type": signal_type,
             "close_price": row["close"],
             "ma5": row["MA_SHORT"],
             "ma30": row["MA_LONG"]
         })
-
-    # Dead Cross: Short MA crosses from above to below Long MA
-    dead = df[(df["short_above"] == False) & (df["prev_short_above"] == True)]
-    for _, row in dead.iterrows():
-        signals.append({
-            "ticker": ticker,
-            "date": row["date"].strftime("%Y-%m-%d"),
-            "signal_type": "DEAD_CROSS",
-            "close_price": row["close"],
-            "ma5": row["MA_SHORT"],
-            "ma30": row["MA_LONG"]
-        })
+        last_signal_type = signal_type
 
     return signals
 
